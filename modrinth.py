@@ -805,6 +805,23 @@ class PackManager:
     def exists(self) -> bool:
         return os.path.exists(self.pack_file)
 
+    def _local_path(self, name: str, value: Any, kind: str) -> str:
+        """Resolve a 'local' source entry to an absolute path (relative paths are relative to pack.toml)."""
+        if not isinstance(value, str) or not value.strip():
+            print(f"Error: local {kind} '{name}' must be set to a file path in {self.pack_file}.", file=sys.stderr)
+            sys.exit(1)
+        p = os.path.expanduser(value.strip())
+        if not os.path.isabs(p):
+            p = os.path.join(self.dir, p)
+        p = os.path.normpath(p)
+        if os.path.isfile(p):
+            return p
+        if os.path.isdir(p):
+            print(f"Error: local {kind} '{name}' is a directory, expected a file: {p}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Error: local {kind} '{name}' not found at: {p}", file=sys.stderr)
+        sys.exit(1)
+
     def load(self) -> Dict[str, Any]:
         if not self.exists():
             return {}
@@ -916,6 +933,12 @@ class PackManager:
             src = sources.get(slug, "modrinth")
             if src == "modrinth":
                 mr_slugs.append(slug)
+            elif src == "local":
+                lp = self._local_path(slug, ver, "mod")
+                mod_dest = get_routed_dest(dest_dir, "mod")
+                os.makedirs(mod_dest, exist_ok=True)
+                shutil.copy2(lp, os.path.join(mod_dest, os.path.basename(lp)))
+                print(f"Copied local mod '{slug}' -> {os.path.basename(lp)}")
             elif src == "github":
                 owner, repo = slug.split("/", 1)
                 asset = resolve_github_release_asset(owner, repo, ver if ver != "latest" else "latest")
@@ -944,11 +967,35 @@ class PackManager:
         gv = data.get("game_version", "1.20.1")
         ld = data.get("loader", "fabric")
         mods = data.get("mods", {})
+        sources = data.get("sources", {})
+        datapacks = data.get("datapacks", {})
+        datapacks_dir = str(data.get("datapacks_dir", "world/datapacks")).strip("/")
 
         print(f"Building .{export_format} modpack: '{pname}'...")
 
+        # (absolute source path, archive path) pairs bundled directly into overrides/
+        local_entries: List[Tuple[str, str]] = []
+
+        for name, val in datapacks.items():
+            src = sources.get(name, "local")
+            if src != "local":
+                print(f"Error: datapack '{name}' uses source '{src}'; only 'local' is supported for datapacks.", file=sys.stderr)
+                sys.exit(1)
+            lp = self._local_path(name, val, "datapack")
+            if not lp.lower().endswith(".zip"):
+                print(f"Error: local datapack '{name}' must be a .zip file: {lp}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Including local datapack '{name}' from {lp}")
+            local_entries.append((lp, f"overrides/{datapacks_dir}/{os.path.basename(lp)}"))
+
         index_files = []
         for slug, ver in mods.items():
+            if sources.get(slug) == "local":
+                lp = self._local_path(slug, ver, "mod")
+                print(f"Including local mod '{slug}' from {lp}")
+                local_entries.append((lp, f"overrides/mods/{os.path.basename(lp)}"))
+                continue
+
             print(f"Resolving export metadata for '{slug}'...")
             p_info = _request(f'/project/{slug}')
             if not p_info:
@@ -991,17 +1038,32 @@ class PackManager:
             }
         }
 
+        written: Set[str] = set()
+
+        def add_file(z: zipfile.ZipFile, full_p: str, arc: str):
+            arc = arc.replace(os.sep, "/")
+            if arc in written:
+                print(f"Warning: skipping duplicate archive entry '{arc}' ({full_p})", file=sys.stderr)
+                return
+            written.add(arc)
+            z.write(full_p, arc)
+
         with zipfile.ZipFile(out_name, 'w', compression=zipfile.ZIP_DEFLATED) as z:
             z.writestr("modrinth.index.json", json.dumps(mrpack_index, indent=2))
+            # Entries declared in pack.toml take precedence over files in the overrides/ folder
+            for lp, arc in local_entries:
+                add_file(z, lp, arc)
             overrides_dir = os.path.join(self.dir, "overrides")
             if os.path.exists(overrides_dir):
                 for root, _, files in os.walk(overrides_dir):
                     for f in files:
                         full_p = os.path.join(root, f)
                         rel_p = os.path.relpath(full_p, overrides_dir)
-                        z.write(full_p, f"overrides/{rel_p}")
+                        add_file(z, full_p, f"overrides/{rel_p}")
 
-        print(f"Successfully exported modpack to: {os.path.abspath(out_name)} ({len(index_files)} declared mods)")
+        n_local_mods = sum(1 for s_ in mods if sources.get(s_) == "local")
+        print(f"Successfully exported modpack to: {os.path.abspath(out_name)} "
+              f"({len(index_files)} indexed mods, {n_local_mods} local mods, {len(datapacks)} local datapacks)")
 
 
 

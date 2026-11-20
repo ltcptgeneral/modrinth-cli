@@ -102,6 +102,25 @@ python modrinth.py pack sync -d ./mods -R
 python modrinth.py pack export -f mrpack -o MyPack.mrpack
 ```
 
+#### Local mods & datapacks
+Set an entry's source to `local` to bundle a file from disk into the `.mrpack` instead of downloading it. Relative paths are resolved from the directory containing `pack.toml`.
+
+```toml
+datapacks_dir = "world/datapacks"   # optional, this is the default
+
+[mods]
+testmod = "path/to/mod.jar"
+
+[datapacks]
+testpack = "path/to/pack.zip"       # must be a .zip
+
+[sources]
+testmod = "local"
+testpack = "local"
+```
+
+Local mods are written to `overrides/mods/`, and datapacks to `overrides/<datapacks_dir>/`. Entries declared in `pack.toml` take precedence over files of the same name in the `overrides/` folder. A missing local file, or a datapack that is not a `.zip`, is an error and the export fails. Only the `local` source is supported for datapacks (it is the default when no source is given).
+
 ### 5. Modpack Unpacking (`.mrpack`)
 ```bash
 python modrinth.py unpack MyPack.mrpack -d ~/.minecraft
